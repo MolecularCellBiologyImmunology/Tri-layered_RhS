@@ -1,0 +1,260 @@
+---
+title: "20220311_bs1_deseq2"
+author: "Bas Spanhaak"
+date: '2022-03-11'
+output:
+  html_document: default
+---
+
+```{r load packages, include=FALSE}
+library(xlsx)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+library(DESeq2)
+library(plotly)
+library(pheatmap)
+library(ggrepel)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(magrittr)
+library(edgeR)
+library(RColorBrewer)
+```
+
+
+The count data and annotated data are loaded and put into a DESeq dataframe. In this analysis I use a grouped design named "Treat": design ~ Treat. Treat is a factor included skinLayers (bi or tri-layered annotations) and the skinType (Dermis or Epidermis annotations). Sample 9 is removed from the dataset as it was an outlier. Some spikes were also removed from the dataset as they are not supposed to be in the analysis.
+
+```{r Load the count data, annotated data, results='hide', warning=FALSE}
+# Load count data
+fn = "../../20220311_bs3_paired_sample_analysis/data/counting_summary/summary_average.tsv"
+counts_with_gene_name=as.matrix(read.csv(fn, sep = "\t", row.names = "gene_id"))
+counts_with_gene_name = cbind(gene_id = rownames(counts_with_gene_name), counts_with_gene_name)
+counts = as.matrix(read.csv(fn, sep = "\t", row.names = "gene_id"))
+
+# Gene id's are replaced by unique gene names.
+invisible(make.names(counts[,1], unique = TRUE))
+rownames(counts) = counts[,1]
+counts = counts[,-1] # remove gene column
+counts = counts[,-9] # remove sample 9
+counts = counts[-c(58677:58775),] # remove spikes
+
+# Get annotated data
+sample_annotations <- read.xlsx2("../../20220311_bs3_paired_sample_analysis/data/sample_annotations.xlsx", 
+                                 sheetIndex = 1,  
+                                 row.names=1)[,c(2,3,5)]
+
+# Make annotations more readable
+colnames(sample_annotations)[1] <- "skinType"
+colnames(sample_annotations)[2] <- "skinLayers"
+colnames(sample_annotations)[3] <- "donor"
+sample_annotations[sample_annotations == "B"] <- "Three"
+sample_annotations[sample_annotations == "A"] <- "Two"
+row.names(sample_annotations) <-  paste("X" , 1:nrow(sample_annotations), sep="") # making the sample names of counts and sample_annotations identical
+
+# Creating a numeric matrix of the character matrix.
+invisible(sapply(counts, as.numeric))
+class(counts) <- "numeric"
+storage.mode(counts) <- "numeric"
+
+# remove sample 9 and make factors of columns.
+sample_annotations = sample_annotations[-9,]
+sample_annotations[,'donor'] <- as.factor(sample_annotations[,'donor'])
+sample_annotations[,'skinType'] <- as.factor(sample_annotations[,'skinType'])
+sample_annotations[,'skinLayers'] <- as.factor(sample_annotations[,'skinLayers'])
+
+Treat <- factor(paste(sample_annotations$skinLayers,sample_annotations$skinType ,sep="."))
+
+mm <- model.matrix(~ Treat,
+                   data = sample_annotations)
+
+mm <- mm[ , colSums(mm) > 0]
+colnames(mm) <- levels(Treat)
+
+# Create DESeqDataSet
+dds = DESeqDataSetFromMatrix(
+  countData = round(counts),
+  colData   = sample_annotations,
+  design    = mm)
+```
+
+Genes with low counts were filtered out.
+
+```{r filter low count genes}
+# filter low count genes
+# Normalized log-counts per million
+lcpm <- cpm(dds, log=TRUE, normalized.lib.sizes = T)
+filtered <- rowSums(lcpm >= 2) >= 4
+sum(filtered)
+filtered_lcpm <- cpm(dds[filtered,], log=TRUE, normalized.lib.sizes = T)
+# Filtering the DGE list
+# The library sizes should be dropped, because these need to be recalculated
+dds.f <- dds[filtered]
+
+# Density plot before filtering
+nsamples <- ncol(dds.f)
+col <- brewer.pal(nsamples, "Paired")
+plot(density(lcpm[,1]), col=col[1], lwd=2, ylim=c(0,3), las=2,
+ main="", xlab="",cex.main=1.5,cex.axis=1.5,cex.lab=1.5,cex.sub=1.5)
+title(main="A. Unfiltered data", xlab="Log-cpm", cex.lab=1.5)
+
+for (i in 2:nsamples){
+den <- density(lcpm[,i])
+lines(den$x, den$y, col=col[i], lwd=2)
+}
+legend("topright", colnames(dds.f), text.col=col, bty="o",ncol=2)
+
+# Density plot after filtering
+plot(density(filtered_lcpm[,1]), col=col[1], lwd=2, ylim=c(0,0.60), las=2,
+ main="", xlab="",cex.main=1.5,cex.axis=1.5,,cex.sub=1.5, cex.lab=1.5)
+title(main="B. Filtered data", xlab="Log-cpm", cex.lab=1.5)
+abline(v=0, lty=3)
+for (i in 2:nsamples){
+ den <- density(filtered_lcpm[,i])
+ lines(den$x, den$y, col=col[i], lwd=2)
+}
+legend("topright", colnames(dds.f), text.col=col, bty="o",ncol=2)
+```
+
+In this PCA you can see that the donors are close to each other and it seems that the donor has an effect on the data as they are grouped (especially on the left side).
+```{r PCA}
+pas_rlog = rlogTransformation(dds)
+plotPCA(pas_rlog, intgroup=c("donor")) + 
+  coord_fixed() + 
+  geom_text(aes(label=name), nudge_x=2, nudge_y=2)
+```
+
+DESeq2 analysis is perfromed.
+```{r Deseq2 analysis}
+dds_norm = DESeq(dds.f)
+```
+
+For each analysis, the results are shrunken to minimize the effect of noise in low counts. A p-value histogram is made, which shows a anti-conservative p-value distribution, the MA plot shows that most genes are centered, meaning that normalization is performed well. The volcano plot shows all genes of interest, and these are also shown in a table. 
+
+# The effect of the adipose layer in dermis.
+
+```{r The effect of treatment in dermis}
+res = results(dds_norm, name= "Two.Dermis") #effect of dermis to adipose layer
+
+res= lfcShrink(dds_norm, type="ashr", res=res)
+
+## Create p-value histogram
+ggplot(as(res, "data.frame"), aes(x = pvalue)) +
+  geom_histogram(binwidth = 0.01, fill = "Royalblue", boundary = 0)
+
+## Create MA plot
+plotMA(res, ylim= c(-8,8))
+
+## Create a volcano plot
+# Create dataframe of DESeqDataSet for more options
+results_df = as.data.frame(res)
+
+## Filter out all genes that have been filtered by DESeq2
+filter_df1 = results_df[complete.cases(results_df),]
+filter_df1$significant = filter_df1$padj < 0.05 & abs(filter_df1$log2FoldChange) > 1
+filter_df1 = rownames_to_column(filter_df1, var='gene')
+
+filter_df1$delabel[filter_df1$test != "FALSE"] <- filter_df1$gene[filter_df1$test != "FALSE"]
+
+volcano_plot = ggplot(filter_df1, aes(x=log2FoldChange, y=-log10(padj), name=gene)) +
+  geom_point(aes(colour=significant), size=1, alpha=0.3) +
+  scale_colour_manual(values=c("black", "red")) +
+  geom_vline(xintercept = 1) +
+  geom_vline(xintercept = -1) +
+  geom_hline(yintercept = -log10(0.05)) +
+  theme_bw(base_size = 16) +
+  theme(legend.position = 'none'+
+  geom_text())
+
+ggplotly(volcano_plot)
+
+# Get list of important genes from data without sample 9 and with LFC shrinkage.
+important_genes = merge(filter_df1[filter_df1$significant,], counts_with_gene_name[,1:2], by="gene")
+
+important_genes = important_genes[order(important_genes$log2FoldChange),]
+
+important_genes_table = kable(important_genes[1:15,], format='markdown', caption = "Table 1: Genes that are differentially expressed in dermis when comaparing the 3 vs 2 layered model, according to exploratory data analysis without sample 9 and with LFC shrinkage." )
+print(important_genes_table)
+
+kable(important_genes, format="html", caption = "Table 1: Genes that are differentially expressed in dermis when comaparing 3 vs 2 layers according to exploratory data analysis without sample 9 and with LFC shrinkage.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  cat(., file = "../output/bs3_important_genes_dermisOnly_3_vs_2_GROUPED.html")
+
+write.csv(important_genes, "../output/bs3_important_genes_dermisOnly_3_vs_2_GROUPED.csv", row.names=FALSE)
+
+library(writexl)
+write.xlsx(important_genes,"DEG_dermis_DESeq2.xlsx")
+```
+
+# The effect of the adipose layer in epidermis.
+The epidermis effect to the adipose layer does not show a nice p-value histogram, making it more difficult to find DEGs.
+
+```{r II The effect of treatment in epidermis}
+res = results(dds_norm, contrast=list("Two.Epidermis", "Three.Epidermis")) #effect of epidermis to adipose layer
+
+res= lfcShrink(dds_norm, type="ashr", res=res)
+
+## Create p-value histogram
+ggplot(as(res, "data.frame"), aes(x = pvalue)) +
+  geom_histogram(binwidth = 0.01, fill = "Royalblue", boundary = 0)
+
+## Create MA plot
+plotMA(res, ylim= c(-8,8))
+
+## Create a volcano plot
+# Create dataframe of DESeqDataSet for more options
+results_df = as.data.frame(res)
+
+## Filter out all genes that have been filtered by DESeq2
+filter_df1 = results_df[complete.cases(results_df),]
+filter_df1$significant = filter_df1$padj < 0.05 & abs(filter_df1$log2FoldChange) > 1
+filter_df1 = rownames_to_column(filter_df1, var='gene')
+
+
+
+volcano_plot = ggplot(filter_df1, aes(x=log2FoldChange, y=-log10(padj), name=gene)) +
+  geom_point(aes(colour=significant), size=1, alpha=0.3) +
+  scale_colour_manual(values=c("black", "red")) +
+  geom_vline(xintercept = 1) +
+  geom_vline(xintercept = -1) +
+  geom_hline(yintercept = -log10(0.05)) +
+  theme_bw(base_size = 16) +
+  theme(legend.position = 'none'+
+  geom_text())
+
+ggplotly(volcano_plot)
+
+# Get list of important genes from data without sample 9 and with LFC shrinkage.
+important_genes = merge(filter_df1[filter_df1$significant,], counts_with_gene_name[,1:2], by="gene")
+
+important_genes = important_genes[order(important_genes$log2FoldChange),]
+
+important_genes_table = kable(important_genes[1:15,], format='markdown', caption = "Table 2: Genes that are differentially  expressed in epidermis comparing the 3 vs 2 layered model, according to exploratory data analysis without sample 9 and with LFC shrinkage.")
+print(important_genes_table)
+
+kable(important_genes, format="html", caption = "Table 2: Genes that are differentially  expressed in epidermis comparing the 3 vs 2 layered model, according to exploratory data analysis without sample 9 and with LFC shrinkage.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  cat(., file = "../output/bs3_important_genes_epidermisOnly_3_vs_2_GROUPED.html")
+
+library(writexl)
+write.xlsx(important_genes,"DEG_epidermis_DESeq2.xlsx")
+```
+
+Individual genes can be plotted.
+
+```{r individual genes}
+gene = "CD36"
+
+plot_count <- plotCounts(dds_norm, gene = gene, intgroup = c('skinLayers', 'skinType'), returnData=TRUE)
+
+ggplot(plot_count, aes(x=skinLayers, y=count, color=skinType)) +
+  geom_point(position=position_jitter(w = 0.1,h = 0)) +
+  geom_text_repel(aes(label = rownames(plot_count))) + 
+  theme_bw() +
+  ggtitle(gene) +
+  theme(plot.title = element_text(hjust = 0.1))
+```
+
+
+
