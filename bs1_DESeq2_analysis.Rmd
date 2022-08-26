@@ -23,8 +23,7 @@ library(edgeR)
 library(RColorBrewer)
 ```
 
-
-The count data and annotated data are loaded and put into a DESeq dataframe. In this analysis I use a grouped design named "Treat": design ~ Treat. Treat is a factor included skinLayers (bi or tri-layered annotations) and the skinType (Dermis or Epidermis annotations). Sample 9 is removed from the dataset as it was an outlier. Some spikes were also removed from the dataset as they are not supposed to be in the analysis.
+The count data and annotated data are loaded and put into a DESeq dataframe. In this analysis I use a grouped design named "Treat": design= ~ Treat. Treat is a factor including skinLayers (bi or tri-layered annotations) and the skinType (Dermis or Epidermis annotations). Sample 9 is removed from the dataset as it was an outlier. Some spikes were removed from the dataset as we are not interested in those.
 
 ```{r Load the count data, annotated data, results='hide', warning=FALSE}
 # Load count data
@@ -118,6 +117,7 @@ legend("topright", colnames(dds.f), text.col=col, bty="o",ncol=2)
 ```
 
 In this PCA you can see that the donors are close to each other and it seems that the donor has an effect on the data as they are grouped (especially on the left side).
+
 ```{r PCA}
 pas_rlog = rlogTransformation(dds)
 plotPCA(pas_rlog, intgroup=c("donor")) + 
@@ -126,6 +126,7 @@ plotPCA(pas_rlog, intgroup=c("donor")) +
 ```
 
 DESeq2 analysis is perfromed.
+
 ```{r Deseq2 analysis}
 dds_norm = DESeq(dds.f)
 ```
@@ -188,7 +189,8 @@ write.xlsx(important_genes,"DEG_dermis_DESeq2.xlsx")
 ```
 
 # The effect of the adipose layer in epidermis.
-The epidermis effect to the adipose layer does not show a nice p-value histogram, making it more difficult to find DEGs.
+
+The epidermis effect to the adipose layer does not show a anti-conservative p-value distribution, making it more difficult to find DEGs. Therefor, less DEGs are found.
 
 ```{r II The effect of treatment in epidermis}
 res = results(dds_norm, contrast=list("Two.Epidermis", "Three.Epidermis")) #effect of epidermis to adipose layer
@@ -210,8 +212,6 @@ results_df = as.data.frame(res)
 filter_df1 = results_df[complete.cases(results_df),]
 filter_df1$significant = filter_df1$padj < 0.05 & abs(filter_df1$log2FoldChange) > 1
 filter_df1 = rownames_to_column(filter_df1, var='gene')
-
-
 
 volcano_plot = ggplot(filter_df1, aes(x=log2FoldChange, y=-log10(padj), name=gene)) +
   geom_point(aes(colour=significant), size=1, alpha=0.3) +
